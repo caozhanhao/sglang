@@ -270,7 +270,10 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
     def dump_record(self, output_mode: _OutputMode = "file"):
         """Dump the expert distribution record and reset the recorder after dumping."""
         output = self._accumulator.dump(output_mode=output_mode)
+        a = time.time()
         self._reset()
+        b = time.time()
+        logger.info(f"reset: b - a = {b - a:.3f} s")
         return output
 
     @property
@@ -870,15 +873,20 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
             num_layers=self._expert_location_metadata.num_layers,
             num_logical_experts=self._expert_location_metadata.num_logical_experts,
             physical_to_logical_map=self._expert_location_metadata.physical_to_logical_map,
-        )
+        ).sum(dim=0)
 
         if self._first_dump:
             self._first_dump = False
             torch.get_device_module().empty_cache()
 
+        logger.info(f"all_reduce shape {logical_count_of_buffered_step.shape}, dtype={logical_count_of_buffered_step.dtype}")
+        a = time.time()
         torch.distributed.all_reduce(
             logical_count_of_buffered_step, op=torch.distributed.ReduceOp.SUM
         )
+        torch.get_device_module().synchronize()
+        b = time.time()
+        logger.info(f"all_reduce {b - a:.3f} seconds")
 
         output = dict(
             rank=self._rank,

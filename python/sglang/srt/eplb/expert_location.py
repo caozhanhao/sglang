@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
@@ -147,6 +148,7 @@ class ExpertLocationMetadata:
     def init_by_eplb(
         server_args: ServerArgs, model_config: ModelConfig, logical_count: torch.Tensor
     ):
+        a = time.time()
         if not isinstance(logical_count, torch.Tensor):
             logical_count = torch.tensor(logical_count)
         if len(logical_count.shape) == 2:
@@ -177,6 +179,8 @@ class ExpertLocationMetadata:
                 ),
             )
         )
+        b = time.time()
+        logger.info(f"eplb diff b - a = {b - a:.3f} s")
 
         return ExpertLocationMetadata._init_raw(
             server_args=server_args,

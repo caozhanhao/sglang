@@ -70,9 +70,17 @@ class EPLBManager:
         if not self._check_rebalance_needed(average_utilization_rate_over_window):
             return
 
+        if enable_timing:
+            torch.get_device_module().synchronize()
+            before_eplb = time.time()
         expert_location_metadata = ExpertLocationMetadata.init_by_eplb(
             self._server_args, self._model_runner.model_config, logical_count
         )
+        if enable_timing:
+            torch.get_device_module().synchronize()
+            time_debug = time.time()
+            logger.info(f"[EPLBManager] init_by_eplb time ={time_debug - before_eplb:.3f}s")
+            logger.info(f"[EPLBManager] debug time ={time_debug - time_start:.3f}s")
 
         update_layer_ids_chunks = self._compute_update_layer_ids_chunks()
         for chunk_index, update_layer_ids in enumerate(update_layer_ids_chunks):
