@@ -1,8 +1,13 @@
+import logging
+import time
 from typing import Tuple
 
 import torch
 
 from sglang.srt.eplb.eplb_algorithms.deepseek import rebalance_experts_hierarchical
+
+
+logger = logging.getLogger(__name__)
 
 
 def rebalance_experts(
@@ -71,6 +76,7 @@ def rebalance_experts(
         ).expand(num_layers, -1),
     )
     if num_active_ranks < num_gpus:
+        a = time.time()
         phy2log_slices = list(
             phy2log.view(num_layers, num_active_ranks, -1).unbind(dim=1)
         )
@@ -84,4 +90,6 @@ def rebalance_experts(
                     log2phy,
                 )
         phy2log = torch.stack(phy2log_slices, dim=1).contiguous().view(num_layers, -1)
+        b = time.time()
+        logger.info(f"eplb step 4 = {b - a:.3f} seconds")
     return phy2log, log2phy, logcnt

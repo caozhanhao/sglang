@@ -1,8 +1,12 @@
 # This file is copied from https://github.com/deepseek-ai/EPLB/blob/main/eplb.py since that one is not a pypi package
+import logging
+import time
 from typing import Tuple
 
 import torch
 
+
+logger = logging.getLogger(__name__)
 
 def balanced_packing(
     weight: torch.Tensor, num_packs: int
@@ -121,6 +125,7 @@ def rebalance_experts_hierarchical(
         return inv
 
     # Step 1: pack groups to nodes
+    a = time.time()
     tokens_per_group = weight.unflatten(-1, (num_groups, group_size)).sum(-1)
     group_pack_index, group_rank_in_pack = balanced_packing(tokens_per_group, num_nodes)
     log2mlog = (
@@ -130,18 +135,24 @@ def rebalance_experts_hierarchical(
         + torch.arange(group_size, dtype=torch.int64, device=group_pack_index.device)
     ).flatten(-2)
     mlog2log = inverse(log2mlog)
+    b = time.time()
+    logger.info(f"eplb step 1 = {b - a:.3f} seconds")
 
     # Step 2: construct redundant experts within nodes
     # [num_layers * num_nodes, num_logical_experts // num_nodes]
+    a = time.time()
     tokens_per_mlog = weight.gather(-1, mlog2log).view(
         -1, num_logical_experts // num_nodes
     )
     phy2mlog, phyrank, mlogcnt = replicate_experts(
         tokens_per_mlog, num_physical_experts // num_nodes
     )
+    b = time.time()
+    logger.info(f"eplb step 2 = {b - a:.3f} seconds")
 
     # Step 3: pack physical_experts to GPUs
     # [num_layers * num_nodes, num_physical_experts // num_nodes]
+    a = time.time()
     tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
     pack_index, rank_in_pack = balanced_packing(tokens_per_phy, num_gpus // num_nodes)
     phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
@@ -162,6 +173,8 @@ def rebalance_experts_hierarchical(
     pphy2log = mlog2log.gather(-1, pphy2mlog)
     pphyrank = phyrank.gather(-1, pphy2phy).view(num_layers, -1)
     logcnt = mlogcnt.view(num_layers, -1).gather(-1, log2mlog)
+    b = time.time()
+    logger.info(f"eplb step 3 = {b - a:.3f} seconds")
     return pphy2log, pphyrank, logcnt
 
 
