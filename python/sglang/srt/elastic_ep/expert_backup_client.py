@@ -107,7 +107,7 @@ class ExpertBackupClient:
             if ret_value != 0:
                 raise RuntimeError("GPU buffer memory registration failed.")
 
-    def update_weights(self):
+    def update_weights(self, weight_name_filter):
         global_expert_location_metadata = get_global_expert_location_metadata()
         num_experts = (
             self.model_config.hf_config.n_routed_experts
@@ -120,6 +120,8 @@ class ExpertBackupClient:
             weight_size_list = []
 
             for name, weight_info in self.dram_map_list[i].items():
+                if weight_name_filter is not None and not weight_name_filter(name):
+                    continue
                 layer_id, expert_id, weight_name = extract_layer_and_expert_id(name)
                 if layer_id >= self.model_config.hf_config.num_hidden_layers:
                     continue
