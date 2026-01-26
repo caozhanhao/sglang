@@ -28,6 +28,7 @@ import einops
 import torch
 import torch.distributed
 
+from sglang.srt.distributed import get_world_group
 from sglang.srt.environ import envs
 from sglang.srt.metrics.collector import ExpertDispatchCollector
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -882,7 +883,9 @@ class _StatAccumulator(_UtilizationRateAccumulatorMixin):
         logger.info(f"all_reduce shape {logical_count_of_buffered_step.shape}, dtype={logical_count_of_buffered_step.dtype}")
         a = time.time()
         torch.distributed.all_reduce(
-            logical_count_of_buffered_step, op=torch.distributed.ReduceOp.SUM
+            logical_count_of_buffered_step,
+            op=torch.distributed.ReduceOp.SUM,
+            group=get_world_group().device_group,
         )
         torch.get_device_module().synchronize()
         b = time.time()
