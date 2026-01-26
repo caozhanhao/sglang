@@ -401,6 +401,7 @@ def compute_logical_to_rank_dispatch_physical_map(
     ep_rank: int,
     seed: int = 42,
 ):
+    a = time.time()
     r = random.Random(seed)
 
     num_local_gpu_physical_experts = num_physical_experts // ep_size
@@ -444,6 +445,8 @@ def compute_logical_to_rank_dispatch_physical_map(
     assert torch.all(logical_to_rank_dispatch_physical_map != -1)
 
     device = logical_to_all_physical_map.device
+    b = time.time()
+    logger.info(f"compute_logical_to_rank_dispatch_physical_map b - a = {b - a:.3f} s")
     return logical_to_rank_dispatch_physical_map[ep_rank, :, :].to(device)
 
 
