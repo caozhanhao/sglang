@@ -49,8 +49,9 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
-from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
+from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation, get_global_expert_location_metadata
 from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
+from sglang.srt.elastic_ep.elastic_ep import ElasticEPStateManager
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.amx_utils import PackWeightMethod
@@ -151,7 +152,6 @@ from sglang.srt.utils import (
     make_layers,
     use_intel_amx_backend,
 )
-
 if _use_aiter_gfx95:
 
     from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (
@@ -288,10 +288,12 @@ class MoEGate(nn.Module):
         self,
         config,
         quant_config,
+        layer_id,
         prefix: str = "",
         is_nextn: bool = False,
     ):
         super().__init__()
+        self.layer_id = layer_id
         self.is_nextn = is_nextn
         self.weight = nn.Parameter(
             torch.empty((config.n_routed_experts, config.hidden_size))
@@ -313,7 +315,7 @@ class MoEGate(nn.Module):
             self.quant_method = PackWeightMethod(weight_names=["weight"])
         self.nsa_enable_prefill_cp = is_nsa_enable_prefill_cp()
 
-    def forward(
+    def _forward_raw(
         self,
         hidden_states,
         gemm_output_zero_allocator: BumpAllocator = None,
@@ -353,6 +355,32 @@ class MoEGate(nn.Module):
             else:
                 logits = F.linear(hidden_states, self.weight, None)
 
+        return logits
+    
+    def forward(
+        self,
+        hidden_states,
+        gemm_output_zero_allocator: BumpAllocator = None,
+        forward_batch: ForwardBatch = None,
+    ):
+        logits = self._forward_raw(hidden_states, gemm_output_zero_allocator, forward_batch)
+
+        elastic_ep_state = ElasticEPStateManager.instance()
+        el_metadata = get_global_expert_location_metadata()
+        if (elastic_ep_state is None) or (el_metadata is None):
+            return logits
+        
+        # Mask missing experts for fault tolerance
+        active_ranks = elastic_ep_state.active_ranks
+        num_local_phy = el_metadata.num_local_physical_experts
+        # Rank X holds physical experts in range(num_local_phy * X, num_local_phy * (X+1)),
+        # Thus, physical expert K lies in Rank floor_div(K, num_local_phy)
+        log2allphy = el_metadata.logical_to_all_physical_map[self.layer_id] # (num_logical_experts, X)
+        log2allranks = log2allphy.div(num_local_phy, rounding_mode='floor')
+        valid_phy_mask = log2allphy >= 0 # filter out -1 padding
+        log2rank_active = (active_ranks[log2allranks] == 1) & valid_phy_mask
+        inactive_log = ~log2rank_active.any(dim=1)
+        logits[:, inactive_log] = float("-inf")
         return logits
 
 
@@ -399,6 +427,7 @@ class DeepseekV2MoE(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("gate", prefix),
             is_nextn=is_nextn,
+            layer_id=layer_id
         )
 
         # scaling factor for fused shared experts on AMD-platform.

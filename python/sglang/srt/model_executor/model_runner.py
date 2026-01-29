@@ -2236,15 +2236,17 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 elastic_ep_state is not None
                 and not elastic_ep_state.is_active_equal_last()
             ):
+                logger.warning("[EPLB] Skipped EPLB though rank faults.")
                 elastic_ep_state.snapshot_active_to_last()
                 elastic_ep_state.sync_active_to_cpu()
-                logging.info("EPLB due to rank faults")
-                gen = self.eplb_manager.rebalance()
-                while True:
-                    try:
-                        next(gen)
-                    except StopIteration:
-                        break
+                # logging.info("EPLB due to rank faults")
+                # gen = self.eplb_manager.rebalance()
+                # next(gen)
+                # while True:
+                #     try:
+                #         next(gen)
+                #     except StopIteration:
+                #         break
                 output = self._forward_raw(
                     forward_batch,
                     skip_attn_backend_init,

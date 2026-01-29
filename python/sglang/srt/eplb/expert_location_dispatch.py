@@ -17,9 +17,9 @@ from typing import Literal, Optional
 
 import torch
 
+from sglang.srt.elastic_ep.elastic_ep import ElasticEPStateManager
 from sglang.srt.eplb.expert_location import get_global_expert_location_metadata
 from sglang.srt.server_args import get_global_server_args
-
 
 @dataclass
 class ExpertLocationDispatchInfo:
@@ -80,11 +80,33 @@ def topk_ids_logical_to_physical(
         return topk_ids
 
     if info.ep_dispatch_algorithm == "static":
-        return _topk_ids_logical_to_physical_static(topk_ids, info)
-    if info.ep_dispatch_algorithm in ["dynamic", "fake"]:
-        return _topk_ids_logical_to_physical_dynamic(topk_ids, info)
-    raise NotImplementedError(f"Unknown algorithm {info.ep_dispatch_algorithm}")
+        phy = _topk_ids_logical_to_physical_static(topk_ids, info)
+    elif info.ep_dispatch_algorithm in ["dynamic", "fake"]:
+        phy = _topk_ids_logical_to_physical_dynamic(topk_ids, info)
+    else:
+        raise NotImplementedError(f"Unknown algorithm {info.ep_dispatch_algorithm}")
+    
+    elastic_ep_state = ElasticEPStateManager.instance()
+    el_metadata = get_global_expert_location_metadata()
+    if (elastic_ep_state is None) or (el_metadata is None):
+        return phy
+    
+    # Remap physical experts in fault rank
+    active_ranks = elastic_ep_state.active_ranks
+    num_local_phy = el_metadata.num_local_physical_experts
+    ranks = phy.div(num_local_phy, rounding_mode='floor')
+    inactive_phyical_ids = (active_ranks[ranks] == 0)
+    # Gather candidates
+    candidates = info.partial_logical_to_all_physical_map[topk_ids] # (n tokens, top-k logical, n replicas)
+    cand_ranks = candidates.div(num_local_phy, rounding_mode='floor')
+    cand_is_active = (active_ranks[cand_ranks] == 1) & (candidates >= 0) # filter out -1 padding
+    # Select active replications in them
+    selected_replica_indices = torch.argmax(cand_is_active.to(torch.int8), dim=-1)
+    active_phy_ids = candidates.gather(-1, selected_replica_indices.unsqueeze(-1)).squeeze(-1)
+    # Remap inactive physical experts
+    phy = torch.where(inactive_phyical_ids, active_phy_ids, phy)
 
+    return phy
 
 def _topk_ids_logical_to_physical_static(
     topk_ids: torch.Tensor, info: Optional[ExpertLocationDispatchInfo]
