@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 import einops
 import torch
 import torch.distributed
-from torch.distributed import P2POp
+from torch.distributed import P2POp, ProcessGroup
 
 from sglang.srt.elastic_ep.elastic_ep import ElasticEPStateManager
 from sglang.srt.eplb.expert_location import (
@@ -41,7 +41,20 @@ _LOG_INPUT = get_bool_env_var("SGLANG_EXPERT_LOCATION_UPDATER_LOG_INPUT")
 class ExpertLocationUpdater:
     def __init__(self):
         self._first_execution = True
-
+        self.p2p_group = torch.distributed.GroupMember.WORLD
+        if "mooncake" in torch.distributed.get_backend():
+            ranks = torch.distributed.get_process_group_ranks(self.p2p_group)
+            self.p2p_group = torch.distributed.new_group(ranks, backend="nccl")
+            # A barrier to ensure `batch_isend_irecv` not the first collective call.
+            # Refer to PyTorch's doc of `batch_isend_irecv`: https://docs.pytorch.org/docs/stable/distributed.html#torch.distributed.distributed_c10d.batch_isend_irecv
+            #   "In addition, if this API is the first collective call in the group passed to dist.P2POp,
+            #    all ranks of the group must participate in this API call; otherwise, the behavior is undefined.
+            #    If this API call is not the first collective call in the group, batched P2P operations involving
+            #    only a subset of ranks of the group are allowed."
+            torch.distributed.barrier(self.p2p_group)
+            logger.warning("[ExpertLocationUpdater]: Mooncake backend detected. " \
+            "Switching P2P group to NCCL for better performance. (FIXME)")
+        
     def update(
         self,
         routed_experts_weights_of_layer: Dict[int, List[torch.Tensor]],
@@ -65,6 +78,7 @@ class ExpertLocationUpdater:
             update_layer_ids=update_layer_ids,
             nnodes=nnodes,
             rank=rank,
+            group=self.p2p_group,
         )
         old_expert_location_metadata.update(
             new_expert_location_metadata,
@@ -121,6 +135,7 @@ def _update_expert_weights_with_canary(
     update_layer_ids: List[int],
     nnodes: int,
     rank: int,
+    group: ProcessGroup,
 ):
     num_local_physical_experts = old_expert_location_metadata.num_local_physical_experts
 
@@ -148,6 +163,7 @@ def _update_expert_weights_with_canary(
         update_layer_ids=update_layer_ids,
         nnodes=nnodes,
         rank=rank,
+        group=group,
     )
 
     for layer_id in update_layer_ids:
@@ -170,6 +186,7 @@ def _update_expert_weights_raw(
     update_layer_ids: List[int],
     nnodes: int,
     rank: int,
+    group: ProcessGroup,
 ):
     log_metrics = get_bool_env_var("SGLANG_EXPERT_LOCATION_UPDATER_LOG_METRICS")
 
@@ -198,6 +215,7 @@ def _update_expert_weights_raw(
             num_local_physical_experts=num_local_physical_experts,
             num_gpu_per_node=num_gpu_per_node,
             rank=rank,
+            group=group,
             world_size=world_size,
             log_metrics=log_metrics,
         )
@@ -218,6 +236,7 @@ def update_expert_weights_single_layer(
     num_local_physical_experts: int,
     num_gpu_per_node: int,
     rank: int,
+    group: ProcessGroup,
     world_size: Optional[int] = None,
     debug: bool = False,
     log_metrics: bool = False,
@@ -394,6 +413,7 @@ def update_expert_weights_single_layer(
                         op=torch.distributed.irecv,
                         tensor=_get_tensor(temp_buffers, i, dst_expert_location),
                         peer=src_rank,
+                        group=group,
                     )
                     for i in range(num_tensors)
                 ],
@@ -444,6 +464,7 @@ def update_expert_weights_single_layer(
                             routed_experts_weights, i, src_expert_location
                         ),
                         peer=dst_rank,
+                        group=group,
                     )
                     for dst_rank in all_dst_ranks
                     if active_ranks[dst_rank]
