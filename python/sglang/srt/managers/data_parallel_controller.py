@@ -96,9 +96,14 @@ class DPBudget:
             self.total_requests[load.dp_rank] = load.num_reqs
             self.total_tokens[load.dp_rank] = load.num_tokens
 
-    def dispatch(self, method: LoadBalanceMethod):
+    def dispatch(self, excluded_ranks: set[int], method: LoadBalanceMethod):
+        candidates = [i for i in range(self.dp_size) if i not in excluded_ranks]
+
+        if not candidates:
+            return None
+        
         if method == LoadBalanceMethod.TOTAL_REQUESTS:
-            target_rank = self.total_requests.index(min(self.total_requests))
+            target_rank = min(candidates, key=lambda i: self.total_requests[i])
         elif method == LoadBalanceMethod.TOTAL_TOKENS:
             # Use total_requests as a tie-breaker when total_tokens are equal
             target_rank = min(
@@ -485,19 +490,21 @@ class DataParallelController:
     def round_robin_scheduler(self, req: Req):
         if self.maybe_external_dp_rank_routing(req):
             return
-
+        
         while True:
-            if self.status[self.round_robin_counter]:
-                logger.info(f"Choose worker {self.round_robin_counter}")
-                self.workers[self.round_robin_counter].send_pyobj(req)
-                self.round_robin_counter = (self.round_robin_counter + 1) % len(
-                    self.workers
-                )
-                break
-            self.round_robin_counter = (self.round_robin_counter + 1) % len(
-                self.workers
-            )
-
+            for i in range(len(self.workers)):
+                curr = (self.round_robin_counter + i) % len(self.workers)
+                if not self.status[curr]:
+                    continue
+                
+                try:
+                    self.workers[curr].send_pyobj(req, flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    continue
+                self.round_robin_counter = (curr + 1) % len(self.workers)
+                logger.info(f"Choose worker {curr}")
+                return
+            
     def follow_bootstrap_room_scheduler(self, req: Req):
         if self.maybe_external_dp_rank_routing(req):
             return
@@ -516,20 +523,40 @@ class DataParallelController:
             "req.bootstrap_room should not be None. Do not send requests directly to "
             "prefill or decode instances; send to the router instead."
         )
-        target_rank = req.bootstrap_room % len(self.workers)
-        self.workers[target_rank].send_pyobj(req)
+        
+        while True:
+            for i in range(len(self.workers)):
+                curr = (req.bootstrap_room + i) % len(self.workers)
+                if not self.status[curr]:
+                    continue
+                try:
+                    self.workers[curr].send_pyobj(req, flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    continue
+                return
+
+    def _dp_budget_dispath_and_send(self, req: Req, method: LoadBalanceMethod):
+        if self.maybe_external_dp_rank_routing(req):
+            return
+        
+        excluded_ranks = {r for r, ok in enumerate(self.status) if not ok}
+        while True:
+            if len(excluded_ranks) >= len(self.status):
+                excluded_ranks = {r for r, ok in enumerate(self.status) if not ok}
+                continue
+        
+            target_worker = self.dp_budget.dispatch(excluded_ranks, method)
+            try:
+                self.workers[target_worker].send_pyobj(req, flags=zmq.NOBLOCK)
+                return
+            except zmq.Again:
+                excluded_ranks.add(target_worker)
 
     def total_requests_scheduler(self, req: Req):
-        if self.maybe_external_dp_rank_routing(req):
-            return
-        target_worker = self.dp_budget.dispatch(LoadBalanceMethod.TOTAL_REQUESTS)
-        self.workers[target_worker].send_pyobj(req)
+        self._dp_budget_dispath_and_send(req, LoadBalanceMethod.TOTAL_REQUESTS)
 
     def total_tokens_scheduler(self, req: Req):
-        if self.maybe_external_dp_rank_routing(req):
-            return
-        target_worker = self.dp_budget.dispatch(LoadBalanceMethod.TOTAL_TOKENS)
-        self.workers[target_worker].send_pyobj(req)
+        self._dp_budget_dispath_and_send(req, LoadBalanceMethod.TOTAL_TOKENS)
 
     def event_loop(self):
         while True:
